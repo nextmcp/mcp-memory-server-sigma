@@ -1,0 +1,12 @@
+# Production Environment Parameters
+# Copy this file to parameters.production.yaml and customize for your environment
+
+template-file-path: aws/template.yaml
+parameters:
+  Environment: production
+  ServiceName: your-service-name
+  MemoryReservation: "2048"
+  CpuReservation: "2048"
+tags:
+  environment: production
+  AppManagerCFNStackKey: production-your-service-name

@@ -1,0 +1,12 @@
+# Staging Environment Parameters
+# Copy this file to parameters.staging.yaml and customize for your environment
+
+template-file-path: aws/template.yaml
+parameters:
+  Environment: staging
+  ServiceName: your-service-name
+  MemoryReservation: "1024"
+  CpuReservation: "1024"
+tags:
+  environment: staging
+  AppManagerCFNStackKey: staging-your-service-name

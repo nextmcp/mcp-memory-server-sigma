@@ -1,0 +1,71 @@
+# Version control
+.git
+.gitignore
+.github
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual Environment
+venv/
+venv_mcp/
+venv_mcp1/
+ENV/
+.venv/
+
+# IDE
+.idea/
+.vscode/
+.cursor/
+*.swp
+*.swo
+
+# Docker
+.dockerignore
+docker-compose*.yml
+Dockerfile
+secrets/*
+
+# Logs
+*.log
+logs/
+
+# OS specific
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Project specific
+aws/
+
+*.md
+./.env*
+update_requirements_txt.sh
+build_new_image.sh
+login_to_ecr.sh
+get_shell_in_container.sh
+connect_to_remote_server.sh
+login_to_codeartifact.sh

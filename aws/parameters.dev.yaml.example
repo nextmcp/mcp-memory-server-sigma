@@ -1,0 +1,12 @@
+# Development Environment Parameters
+# Copy this file to parameters.dev.yaml and customize for your environment
+
+template-file-path: aws/template.yaml
+parameters:
+  Environment: dev
+  ServiceName: your-service-name
+  MemoryReservation: "1024"
+  CpuReservation: "1024"
+tags:
+  environment: dev
+  AppManagerCFNStackKey: dev-your-service-name

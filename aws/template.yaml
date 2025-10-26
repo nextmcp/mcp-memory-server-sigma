@@ -1,0 +1,530 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: Deploys the flock-mcp-server to the configured environment
+Transform:
+  - AWS::LanguageExtensions
+  - AWS::SecretsManager-2020-07-23
+
+Parameters:
+  Environment:
+    Type: String
+    Description: Which environment to deploy to.
+    AllowedValues:
+      - dev
+      - staging
+      - production
+  InternalPort:
+    Type: Number
+    Description: "The internal port number for the service."
+    Default: 8000
+  ServiceName:
+    Type: String
+    Description: "The name of the this service."
+  ImageName:
+    Type: String
+    Default: ""
+    Description: The uri of the docker image to deploy. If not specified, will attempt to find an export called "${ServiceName}-ecr-uri" and use the tag from ImageTag
+  ImageTag:
+    Type: String
+    Default: ""
+    Description: The tag of the docker image to deploy. If not specified, will use the tag "${Environment}-latest"
+  WebACLArn:
+    Type: String
+    Default: arn:aws:wafv2:us-east-1:YOUR_AWS_ACCOUNT_ID:regional/webacl/user-api-production/4965eddd-b67d-49f1-9b17-42ffe662ba7e
+  MemoryReservation:
+    Type: Number
+    Description: The minimum memory to allocate for a new process
+    Default: 512
+  MemoryMax:
+    Type: Number
+    Description: The maximum memory to allow before killing tasks
+    Default: 4096
+  CpuReservation:
+    Type: Number
+    Description: The minimum number of cpu units required to deploy the task
+    Default: 768
+  HealthCheckTimeoutSeconds:
+    Type: Number
+    Default: 5
+    Description: The timeout for the healthchecks.
+  HealthCheckStartPeriodSeconds:
+    Type: Number
+    Default: 15
+    Description: The time to wait after the container starts before checking for health.
+  HealthCheckIntervalSeconds:
+    Type: Number
+    Default: 30
+    Description: The time between health check attempts
+  HealthCheckUnhealthyThresholdCount:
+    Type: Number
+    Default: 4
+    Description: |
+      The number of health checks to fail before being marked as unhealthy.
+      The container will be marked as unhealthy after (HealthCheckIntervalSeconds * HealthCheckRetryCount)
+      If the container is never healthy, it will be marked as unhealthy after HealthCheckStartPeriodSeconds + (HealthCheckIntervalSeconds * HealthCheckRetryCount)
+  HealthCheckPath:
+    Type: String
+    Default: /health
+    Description: The path for health checks
+  CognitoPoolId:
+    Type: String
+    Default: ""
+    Description: The Id of the user pool to use. Must be in the same region as this stack.
+  CognitoPoolDomain:
+    Type: String
+    Default: ""
+    Description: The domain for the user pool logins for login redirects. Must be associated with the pool specified in CognitoPoolId.
+
+Mappings:
+  VPCEnvironments:
+    Env:
+      dev: staging
+      staging: staging
+      production: production
+
+Conditions:
+  CreateOauthClient: !Not [ !Equals [ !Ref CognitoPoolId, "" ] ]
+
+  EnableOauth:
+    Fn::And:
+      - !Not [ !Equals [ !Ref CognitoPoolId, "" ] ]
+      - !Not [ !Equals [ !Ref CognitoPoolDomain, "" ] ]
+    
+  ECRImageSpecified: !Not [ !Equals [ !Ref ImageName, "" ] ]
+  ImageTagSpecified: !Not [ !Equals [ !Ref ImageTag, "" ] ]
+  ImageTagIsSha256: !Equals [ !Select [ 0, !Split [ ":", !Ref ImageTag ] ], "sha256" ]
+
+Resources:
+  LogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      RetentionInDays: 7
+  TaskExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: SecretsAccess
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Sid: FindServiceSecrets
+                Effect: Allow
+                Action: secretsmanager:ListSecrets
+                Resource: '*'
+              - Sid: ReadServiceSecrets
+                Effect: Allow
+                Action: secretsmanager:GetSecretValue
+                Resource:
+                  - !Sub arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${Environment}/${ServiceName}/*
+                  - !Sub arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:staging/staging-data-pipeline-db-db-credentials*
+  TaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: !Ref AWS::StackName
+      RequiresCompatibilities:
+        - EC2
+      NetworkMode: awsvpc
+      Cpu: !Ref CpuReservation
+      Memory: !Ref MemoryMax
+      ExecutionRoleArn: !Sub arn:aws:iam::${AWS::AccountId}:role/ecsTaskExecutionRole
+      TaskRoleArn: !GetAtt TaskExecutionRole.Arn 
+      ContainerDefinitions:
+        - Name: qdrant
+          Image: qdrant/qdrant:latest
+          Essential: false
+          Memory: 512
+          MemoryReservation: 256
+          Cpu: 128
+          PortMappings:
+            - ContainerPort: 6333
+              Protocol: tcp
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref LogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: qdrant
+        - Name: !Ref AWS::StackName
+          Image: 
+            Fn::If:
+              - ECRImageSpecified
+              - !Ref ImageName
+              - Fn::Sub:
+                - ${ECRUri}${Separator}${ECRTag}
+                - ECRUri:
+                    Fn::ImportValue: !Sub ${ServiceName}-ecr-uri
+                  Separator:
+                    Fn::If:
+                      - ImageTagIsSha256
+                      - "@"
+                      - ":"
+                  ECRTag:
+                    Fn::If:
+                      - ImageTagSpecified
+                      - !Ref ImageTag
+                      - !Sub ${Environment}-latest
+          Essential: true
+          Memory: !Ref MemoryReservation
+          MemoryReservation: !Ref MemoryReservation
+          Cpu: 640
+          PortMappings:
+            - ContainerPort: !Ref InternalPort
+              Protocol: tcp
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref LogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: !Ref ServiceName
+          Environment:
+            - Name: ENVIRONMENT
+              Value: !Ref Environment
+            - Name: PORT
+              Value: !Ref InternalPort
+            - Name: AWS_DEFAULT_REGION
+              Value: !Ref AWS::Region
+            - Name: AWS_REGION
+              Value: !Ref AWS::Region
+            - Name: DB_SECRET_NAME
+              Value: staging/staging-data-pipeline-db-db-credentials
+            - Name: JSON_LOGGING_ENABLED
+              Value: "True"
+            - Name: BIND_PUBLIC_HOST
+              Value: "True"
+            - Name: DISABLE_HEALTH_CHECK_ACCESS_LOGS
+              Value: "True"
+            - Name: HEALTH_CHECK_PATH
+              Value: !Ref HealthCheckPath
+            - Name: DD_TRACE_ENABLED
+              Value: "False"
+            - Name: DD_ENV
+              Value: !Ref Environment
+            - Name: DD_VERSION
+              Value: !Ref ImageTag
+            - Name: OPENAI_API_KEY
+              Value: !Sub '{{resolve:secretsmanager:${Environment}/${ServiceName}/OPENAI_API_KEY}}'
+            - Name: QDRANT_HOST
+              Value: localhost
+            - Name: QDRANT_PORT
+              Value: "6333"
+          HealthCheck:  
+            Command:
+              - "CMD-SHELL"
+              - !Sub curl -f -A container-health-check http://localhost:${InternalPort}${HealthCheckPath}
+            Interval: !Ref HealthCheckIntervalSeconds
+            Timeout: !Ref HealthCheckTimeoutSeconds
+            Retries: !Ref HealthCheckUnhealthyThresholdCount
+            StartPeriod: !Ref HealthCheckStartPeriodSeconds
+
+  Service:
+    Type: AWS::ECS::Service
+    DependsOn:
+      - HTTPSListenerPublic # so that the load balancer rule is in place before it tries to associate the service with the LB that has no rules.
+    Properties:
+      ServiceName: !Ref AWS::StackName
+      Cluster:
+        Fn::ImportValue: !Sub ${Environment}-ecs-cluster-arn
+      TaskDefinition: !Ref TaskDefinition
+      CapacityProviderStrategy:
+        - CapacityProvider: 
+            Fn::ImportValue: !Sub ${Environment}-ecs-cluster-capacity-provider
+          Weight: 1
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          Subnets:
+            - Fn::ImportValue:
+                Fn::Sub:
+                  - ${VPCEnvironment}-subnet-private-1
+                  - VPCEnvironment:
+                      Fn::FindInMap: [ VPCEnvironments, Env, !Ref Environment ]
+            - Fn::ImportValue:
+                Fn::Sub:
+                  - ${VPCEnvironment}-subnet-private-2
+                  - VPCEnvironment:
+                      Fn::FindInMap: [ VPCEnvironments, Env, !Ref Environment ]
+          SecurityGroups:
+            - Fn::ImportValue:
+                Fn::Sub:
+                  - ${VPCEnvironment}-vpc-internal-sg
+                  - VPCEnvironment:
+                      Fn::FindInMap: [ VPCEnvironments, Env, !Ref Environment ]
+          AssignPublicIp: DISABLED
+      DeploymentConfiguration:
+        MaximumPercent: 250
+        MinimumHealthyPercent: 100
+        DeploymentCircuitBreaker:
+          Enable: true
+          Rollback: true
+      DesiredCount: 1
+      EnableECSManagedTags: true
+      LoadBalancers:
+        - ContainerName: !Ref AWS::StackName
+          ContainerPort: !Ref InternalPort
+          TargetGroupArn: !Ref TargetGroupPublic
+        - ContainerName: qdrant
+          ContainerPort: 6333
+          TargetGroupArn: !Ref TargetGroupQdrant
+      PropagateTags: SERVICE
+      Tags:
+        - Key: environment
+          Value: !Ref Environment
+  LoadBalancerPublic:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      IpAddressType: ipv4
+      Scheme: internet-facing
+      SecurityGroups:
+        - Fn::ImportValue:
+            Fn::Sub:
+              - ${VPCEnvironment}-lb-sg
+              - VPCEnvironment:
+                  Fn::FindInMap: [ VPCEnvironments, Env, !Ref Environment ]
+      Subnets:
+        - Fn::ImportValue:
+            Fn::Sub:
+              - ${VPCEnvironment}-subnet-public-1
+              - VPCEnvironment:
+                  Fn::FindInMap: [ VPCEnvironments, Env, !Ref Environment ]
+        - Fn::ImportValue:
+            Fn::Sub:
+              - ${VPCEnvironment}-subnet-public-2
+              - VPCEnvironment:
+                  Fn::FindInMap: [ VPCEnvironments, Env, !Ref Environment ]
+      Type: application
+      Tags:
+          - Key: environment
+            Value: !Ref Environment
+  WafAclAssociationPublic:
+    Type: AWS::WAFv2::WebACLAssociation
+    Properties:
+      ResourceArn: !Ref LoadBalancerPublic
+      WebACLArn: !Ref WebACLArn  
+  TargetGroupPublic:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      HealthCheckPath: !Ref HealthCheckPath
+      HealthCheckProtocol: HTTP
+      HealthCheckTimeoutSeconds: !Ref HealthCheckTimeoutSeconds
+      HealthCheckIntervalSeconds: !Ref HealthCheckIntervalSeconds
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: !Ref HealthCheckUnhealthyThresholdCount
+      Matcher:
+        HttpCode: 200
+      Port: !Ref InternalPort
+      Protocol: "HTTP"
+      TargetType: ip
+      VpcId:
+        Fn::ImportValue:
+            Fn::Sub:
+              - ${VPCEnvironment}-vpc-id
+              - VPCEnvironment:
+                  Fn::FindInMap: [ VPCEnvironments, Env, !Ref Environment ]
+      Tags:
+        - Key: environment
+          Value: !Ref Environment
+
+  TargetGroupQdrant:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      HealthCheckPath: /
+      HealthCheckProtocol: HTTP
+      HealthCheckTimeoutSeconds: 5
+      HealthCheckIntervalSeconds: 30
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 2
+      Matcher:
+        HttpCode: 200,404
+      Port: 6333
+      Protocol: "HTTP"
+      TargetType: ip
+      VpcId:
+        Fn::ImportValue:
+            Fn::Sub:
+              - ${VPCEnvironment}-vpc-id
+              - VPCEnvironment:
+                  Fn::FindInMap: [ VPCEnvironments, Env, !Ref Environment ]
+      Tags:
+        - Key: environment
+          Value: !Ref Environment
+
+  HTTPListenerPublic:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref LoadBalancerPublic
+      Port: 80
+      Protocol: HTTP
+      DefaultActions:
+        - Type: redirect
+          RedirectConfig:
+            Host: "#{host}"
+            Path: "/#{path}"
+            Port: "443"
+            Protocol: "HTTPS"
+            Query: "#{query}"
+            StatusCode: "HTTP_301"
+
+  HTTPSListenerPublic:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref LoadBalancerPublic
+      Certificates:
+        - CertificateArn: !Ref CertificatePublic
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref TargetGroupPublic
+      Port: 443
+      Protocol: HTTPS
+      SslPolicy: ELBSecurityPolicy-TLS-1-2-2017-01
+
+  CertificatePublic:
+    Type: AWS::CertificateManager::Certificate
+    Properties:
+      DomainName: !Ref Route53PublicTXT
+      ValidationMethod: DNS
+      DomainValidationOptions:
+        - DomainName: !Ref Route53PublicTXT
+          HostedZoneId:
+            Fn::ImportValue: !Sub ${Environment}-hosted-zone-id
+  QdrantDashboardRule:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    DependsOn:
+      - TargetGroupQdrant
+      - HTTPSListenerPublic
+    Properties:
+      Actions:
+        - Type: forward
+          TargetGroupArn: !Ref TargetGroupQdrant
+      Conditions:
+        - Field: path-pattern
+          PathPatternConfig:
+            Values:
+              - "/dashboard"
+              - "/dashboard/*"
+              - "/collections"
+              - "/collections/*"
+              - "/cluster"
+      ListenerArn: !Ref HTTPSListenerPublic
+      Priority: 100
+
+  LoginRuleAppPublic:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Condition: EnableOauth
+    DependsOn:
+      - TargetGroupPublic
+      - HTTPSListenerPublic
+    Properties:
+      Actions:
+        - Type: authenticate-cognito
+          Order: 1
+          AuthenticateCognitoConfig:
+            UserPoolArn: !Sub arn:aws:cognito-idp:${AWS::Region}:${AWS::AccountId}:userpool/${CognitoPoolId}
+            UserPoolClientId: !Ref CognitoUserPoolClient
+            UserPoolDomain: !Ref CognitoPoolDomain
+            SessionCookieName: !Sub ${ServiceName}-session
+            Scope: openid
+            AuthenticationRequestExtraParams:
+              display: page
+              prompt: login
+            # The user should be authenticated from another request already!
+            OnUnauthenticatedRequest: authenticate
+        - Type: forward
+          Order: 2
+          TargetGroupArn: !Ref TargetGroupPublic
+      Conditions:
+        - Field: path-pattern
+          PathPatternConfig:
+            Values:
+              # Limit 5 paths per rule
+              # https://litellm-api.up.railway.app/
+              - "/*"
+      ListenerArn: !Ref HTTPSListenerPublic
+      Priority: 200
+  Route53PublicTXT:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneName:
+        Fn::ImportValue: !Sub ${Environment}-hosted-zone-name
+      Name:
+        Fn::Sub:
+          - ${ServiceName}-public.${HostedZoneName}
+          - HostedZoneName:
+              Fn::ImportValue: !Sub ${Environment}-hosted-zone-name
+      Type: TXT
+      ResourceRecords:
+        - !Sub "\"${ServiceName}\""
+      TTL: 600
+
+  Route53Public:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      AliasTarget:
+        HostedZoneId: !GetAtt LoadBalancerPublic.CanonicalHostedZoneID
+        DNSName: !GetAtt LoadBalancerPublic.DNSName
+      HostedZoneName:
+        Fn::ImportValue: !Sub ${Environment}-hosted-zone-name
+      Name: !Ref Route53PublicTXT
+      Type: A
+  CognitoUserPoolClient:
+    Type: AWS::Cognito::UserPoolClient
+    Condition: CreateOauthClient
+    Properties:
+      ClientName: !Ref AWS::StackName
+      UserPoolId: !Ref CognitoPoolId
+      GenerateSecret: True
+      RefreshTokenValidity: 30
+      AllowedOAuthFlowsUserPoolClient: True
+      AllowedOAuthFlows:
+        - code
+      AllowedOAuthScopes:
+        - email
+        - openid
+        - profile
+      CallbackURLs:
+        - !Sub https://${Route53PublicTXT}/oauth2/idpresponse
+        - !Sub http://localhost:3000/callback
+      LogoutURLs:
+        - !Sub http://localhost:3000/logout
+      SupportedIdentityProviders:
+        - COGNITO
+      PreventUserExistenceErrors: ENABLED
+      EnableTokenRevocation: true
+      ExplicitAuthFlows:
+        - ALLOW_REFRESH_TOKEN_AUTH
+        - ALLOW_USER_SRP_AUTH
+      TokenValidityUnits:
+        AccessToken: hours
+        IdToken: hours
+        RefreshToken: days
+      AccessTokenValidity: 1
+      IdTokenValidity: 1
+  ResourceServer:
+    Type: AWS::Cognito::UserPoolResourceServer
+    Condition: CreateOauthClient
+    Properties:
+      UserPoolId: !Ref CognitoPoolId
+      Identifier: !Sub ${AWS::StackName}
+      Name: !Sub ${AWS::StackName}
+      Scopes:
+        - ScopeName: read
+          ScopeDescription: Read access 
+        - ScopeName: write
+          ScopeDescription: Write access
+
+Outputs:
+  ServiceName:
+    Description: The name of the ECS service
+    Value: !Ref AWS::StackName
+    Export:
+      Name: !Sub ${AWS::StackName}-service-name
+
+  ServiceURL:
+    Description: The URL of the service
+    Value: !Sub https://${Route53PublicTXT}
+    Export:
+      Name: !Sub ${AWS::StackName}-url

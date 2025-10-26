@@ -1,0 +1,56 @@
+name: Run Tests
+
+on:
+  workflow_call:
+
+permissions:
+  id-token: write
+  contents: read
+  checks: write
+  
+jobs:
+  test:
+    name: Run Tests
+    runs-on:
+      - self-hosted
+      - ecs
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Get Python version from pyproject.toml
+        id: get-python-version
+        run: |
+          PYTHON_VERSION=$(grep "requires-python" pyproject.toml | sed 's/.*>=//' | tr -d '"')
+          echo "python_version=$PYTHON_VERSION" >> $GITHUB_OUTPUT
+          echo "Using Python version: $PYTHON_VERSION"
+
+      - name: Get project name from pyproject.toml
+        id: get-project-name
+        run: |
+          PROJECT_NAME=$(grep "name = " pyproject.toml | sed 's/.*name = "//' | sed 's/".*//')
+          echo "project_name=$PROJECT_NAME" >> $GITHUB_OUTPUT
+          echo "Project name: $PROJECT_NAME"
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: ${{ steps.get-python-version.outputs.python_version }}
+
+      - name: Install dependencies
+        run: |
+          pip install -e .[dev]
+
+      - name: Run tests with coverage
+        env:
+          APP_SRC_DIR: src/${{ steps.get-project-name.outputs.project_name }}
+        shell: bash
+        run: ./run_tests.sh
+
+      - name: Upload coverage reports
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: coverage-reports
+          path: htmlcov/
+          retention-days: 30

@@ -1,0 +1,53 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: Creates an ECR repository with lifecycle policies for different image tags
+Transform:
+  - AWS::LanguageExtensions
+
+Parameters:
+  ServiceName:
+    Type: String
+    Description: The name of this service
+
+Resources:
+  ECRRepository:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: !Ref ServiceName
+      ImageScanningConfiguration:
+        ScanOnPush: true
+      LifecyclePolicy:
+        LifecyclePolicyText: 
+          Fn::ToJsonString:
+            rules:
+              - rulePriority: 1
+                description: "Keep last 10 dev images"
+                selection:
+                  tagStatus: tagged
+                  tagPrefixList:
+                    - "dev-"
+                  countType: imageCountMoreThan
+                  countNumber: 10
+                action:
+                  type: expire
+              - rulePriority: 2
+                description: "Keep last 5 staging images"
+                selection:
+                  tagStatus: tagged
+                  tagPrefixList:
+                    - "staging-"
+                  countType: imageCountMoreThan
+                  countNumber: 5
+                action:
+                  type: expire
+Outputs:
+  RepositoryUri:
+    Description: The URI of the ECR repository
+    Value: !GetAtt ECRRepository.RepositoryUri
+    Export:
+      Name: !Sub ${ServiceName}-ecr-uri
+
+  RepositoryArn:
+    Description: The ARN of the ECR repository
+    Value: !GetAtt ECRRepository.Arn
+    Export:
+      Name: !Sub ${ServiceName}-ecr-arn

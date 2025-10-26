@@ -1,0 +1,62 @@
+name: Deploy Service
+
+on:
+  workflow_call:
+    inputs:
+      environment:
+        required: true
+        type: string
+      build_tag:
+        required: true
+        type: string
+
+permissions:
+  id-token: write
+  contents: read
+  checks: write
+
+jobs:
+  deploy-service:
+    runs-on:
+      - self-hosted
+      - ecs
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      
+      - name: Get Service Info
+        id: get-service-info
+        uses: ./.github/actions/get-service-info
+        with:
+          environment: ${{ inputs.environment }}
+      
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          # TODO: Replace with your AWS account ID and IAM role
+          role-to-assume: arn:aws:iam::YOUR_AWS_ACCOUNT_ID:role/cicd-deployer
+          role-session-name: ${{ steps.get-service-info.outputs.service_name }}-service-checker
+          aws-region: us-east-1
+
+      - name: Convert parameters to CloudFormation format
+        id: convert-parameters
+        run: |
+          # Extract individual parameter values from YAML
+          ENV=$(yq -r '.parameters.Environment' aws/parameters.${{ inputs.environment }}.yaml)
+          SERVICE=$(yq -r '.parameters.ServiceName' aws/parameters.${{ inputs.environment }}.yaml)
+          
+          # Build comma-separated parameter string
+          PARAM_OVERRIDES="Environment=${ENV},ServiceName=${SERVICE},ImageTag=${{ inputs.build_tag }}"
+          
+          echo "parameter_overrides=${PARAM_OVERRIDES}" >> $GITHUB_OUTPUT
+          echo "Parameter overrides: ${PARAM_OVERRIDES}"
+
+      - name: Deploy/Update Service Stack
+        id: cft-deploy
+        uses: aws-actions/aws-cloudformation-github-deploy@master
+        with:
+          name: ${{ steps.get-service-info.outputs.service_stack_name }}
+          template: aws/template.yaml
+          parameter-overrides: ${{ steps.convert-parameters.outputs.parameter_overrides }}
+          no-fail-on-empty-changeset: "1"
+          capabilities: CAPABILITY_AUTO_EXPAND,CAPABILITY_IAM
